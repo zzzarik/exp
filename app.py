@@ -3,11 +3,12 @@ import pandas as pd
 import pycountry
 import requests
 import re
+import json
 
-st.set_page_config(page_title="ASO Global Pro Fixed", layout="wide")
+st.set_page_config(page_title="ASO Global Pro Clean", layout="wide")
 
-st.title("📱 Глобальный ASO Парсер метаданных")
-st.caption("Исправленная версия: выбор по группам, поиск и автоподгрузка картинок через =IMAGE()")
+st.title("📱 Официальный Глобальный ASO Парсер")
+st.caption("Прямые запросы к Google и Apple без сторонних API и воркеров")
 
 platform = st.selectbox("1. Выберите платформу", ["Google Play", "App Store"])
 app_id = st.text_input("2. Введите ID приложения (бандл)", placeholder="com.instagram.android / id389801252")
@@ -15,10 +16,8 @@ app_id = st.text_input("2. Введите ID приложения (бандл)",
 st.markdown("---")
 st.subheader("🌍 3. Выбор стран и регионов")
 
-# Полная база всех стран мира из ISO (переводим ключи в верхний регистр для стабильности поиска)
 ALL_COUNTRIES = {c.alpha_2.upper(): c.name for c in pycountry.countries}
 
-# Твои ГЕО-группы (коды строго в верхнем регистре)
 GEO_GROUPS = {
     "Tier-1 (Запад)": ["US", "CA", "GB", "DE", "FR", "IT", "ES", "AU"],
     "Tier-1 (Азия)": ["JP", "KR", "CN", "TW", "SG"],
@@ -28,28 +27,24 @@ GEO_GROUPS = {
     "СНГ и Смежные": ["RU", "KZ", "BY", "UZ", "AM", "GE", "UA", "KG", "MD", "AZ"]
 }
 
-# 1. Выбираем группы
 selected_groups = st.multiselect("Быстрый выбор регионов группами:", options=list(GEO_GROUPS.keys()))
 
-# Собираем коды стран из выбранных групп
 preselected_codes = set()
 for group in selected_groups:
     preselected_codes.update(GEO_GROUPS[group])
 
-# Формируем списки для отображения в поиске
 all_countries_options = [f"{code} - {name}" for code, name in ALL_COUNTRIES.items()]
 default_countries_options = [f"{code} - {ALL_COUNTRIES[code]}" for code in preselected_codes if code in ALL_COUNTRIES]
 
-# 2. Итоговый поиск-мультиселект
 final_selected_countries = st.multiselect(
-    "Итоговый список стран для выгрузки (можно искать и добавлять вручную):",
+    "Итоговый список стран для выгрузки:",
     options=all_countries_options,
     default=default_countries_options
 )
 
 st.markdown("---")
 
-# Официальная карта мультиязычности для Google Play (ключи в верхнем регистре)
+# Карта мультиязычности
 MULTI_LANG_EXCEPTIONS = {
     "SA": ["ar", "en"], "QA": ["ar", "en"], "AE": ["ar", "en"], "KW": ["ar", "en"], 
     "BH": ["ar", "en"], "OM": ["ar", "en"], "EG": ["ar", "en"], "JO": ["ar", "en"], "LB": ["ar", "en"],
@@ -67,29 +62,54 @@ def get_official_languages(country_code):
         return MULTI_LANG_EXCEPTIONS[up_code]
     return [country_code.lower(), "en"]
 
-# --- Функции парсинга ---
-def parse_google_play(bundle, country, lang):
-    # API требует нижний регистр для параметров URL
-    c_low = country.lower()
-    l_low = lang.lower()
-    url = f"https://play-store-api.asotools.workers.dev/api/apps/{bundle}?lang={l_low}&country={c_low}"
+# --- ПРЯМОЙ ПАРСИНГ GOOGLE PLAY БЕЗ ПОСРЕДНИКОВ ---
+def parse_google_play_direct(bundle, country, lang):
+    # Официальный URL Google Play с параметрами локали и региона
+    url = f"https://play.google.com/store/apps/details?id={bundle}&hl={lang}&gl={country}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": f"{lang}-{country.upper()},{lang};q=0.9"
+    }
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            item = res.json()
-            if "title" in item:
-                return {
-                    "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
-                    "Title": item.get("title"), "Subtitle / Short": item.get("summary"), "Description": item.get("description"),
-                    "Icon": item.get("icon"), "Screenshots": item.get("screenshots", [])
-                }
+            html = res.text
+            
+            # Извлекаем Тайтл
+            title_match = re.search(r'<h1[^>]*itemprop="name"[^>]*><span[^>]*>([^<]+)</span>', html)
+            if not title_match:
+                title_match = re.search(r'<title[^>]*>([^<]+) - Apps on Google Play</title>', html)
+            title = title_match.group(1).strip() if title_match else "Unknown Title"
+            
+            # Извлекаем Иконку
+            icon_match = re.search(r'<img[^>]*itemprop="image"[^>]*src="([^"]+)"', html)
+            if not icon_match:
+                icon_match = re.search(r'srcset="([^ ]+)[^"]*"[^>]*itemprop="image"', html)
+            icon = icon_match.group(1) if icon_match else ""
+            if icon and icon.startswith("//"): icon = "https:" + icon
+
+            # Извлекаем Скриншоты
+            screenshot_urls = re.findall(r'<img[^>]*srcset="([^ ]+)' , html)
+            # Фильтруем только уникальные ссылки на скриншоты (гугловские s3/ggpht)
+            screenshots = list(set([src for src in screenshot_urls if "ggpht.com" in src or "googleusercontent.com" in src]))[:8]
+            
+            # Короткое и полное описание (базовый сбор)
+            desc_match = re.search(r'<div[^>]*itemprop="description"[^>]*>.*?<div[^>]*>(.*?)</div>', html, re.DOTALL)
+            description = desc_match.group(1).replace("<br>", "\n").strip() if desc_match else "Открыть стор для просмотра описания"
+            
+            return {
+                "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
+                "Title": title, "Subtitle / Short": "Прямой сбор текста", "Description": description[:500] + "...", 
+                "Icon": icon, "Screenshots": screenshots
+            }
         else:
-            st.warning(f"Google Play API вернул статус {res.status_code} для {country}-{lang}")
-    except Exception as e: 
-        st.error(f"Системная ошибка запроса GP для {country}: {e}")
+            st.warning(f"Google Play вернул статус {res.status_code} для {country.upper()}-{lang.upper()}")
+    except Exception as e:
+        st.error(f"Ошибка запроса к Google для {country.upper()}: {e}")
     return None
 
-def parse_app_store(app_id, country):
+# --- ПРЯМОЙ ПАРСИНГ APP STORE БЕЗ ПОСРЕДНИКОВ ---
+def parse_app_store_direct(app_id, country):
     if "id" in app_id:
         match = re.search(r'id(\d+)', app_id)
         if match: app_id = match.group(1)
@@ -103,13 +123,13 @@ def parse_app_store(app_id, country):
                 item = json_data["results"][0]
                 return {
                     "Platform": "App Store", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": "DEFAULT",
-                    "Title": item.get("trackName"), "Subtitle / Short": item.get("subtitle", ""), "Description": item.get("description"),
-                    "Icon": item.get("artworkUrl100"), "Screenshots": item.get("screenshotUrls", [])
+                    "Title": item.get("trackName"), "Subtitle / Short": item.get("subtitle", ""), "Description": item.get("description", "")[:500] + "...",
+                    "Icon": item.get("artworkUrl100"), "Screenshots": item.get("screenshotUrls", [])[:8]
                 }
         else:
-            st.warning(f"App Store API вернул статус {res.status_code} для {country}")
+            st.warning(f"App Store вернул статус {res.status_code} для {country.upper()}")
     except Exception as e: 
-        st.error(f"Системная ошибка запроса Apple для {country}: {e}")
+        st.error(f"Ошибка запроса к Apple для {country.upper()}: {e}")
     return None
 
 # --- Сбор ---
@@ -119,19 +139,18 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
     elif not final_selected_countries:
         st.error("Выберите страны!")
     else:
-        # Теперь парсим код страны железно по первым двум буквам строки (например, "QA - Qatar" -> "QA")
         chosen_country_codes = [text.split(" - ")[0].strip().upper() for text in final_selected_countries]
         raw_results = []
         
-        with st.spinner("Выгружаем данные..."):
+        with st.spinner("Связываемся напрямую со сторами..."):
             for country in chosen_country_codes:
                 if platform == "Google Play":
                     langs = get_official_languages(country)
                     for lang in langs:
-                        data = parse_google_play(app_id, country, lang)
+                        data = parse_google_play_direct(app_id, country, lang)
                         if data: raw_results.append(data)
                 else:
-                    data = parse_app_store(app_id, country)
+                    data = parse_app_store_direct(app_id, country)
                     if data: raw_results.append(data)
                         
         if raw_results:
@@ -149,7 +168,7 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
                     "Иконка": f'=IMAGE("{item["Icon"]}")' if item["Icon"] else ""
                 }
                 
-                screenshots = item["Screenshots"][:8]
+                screenshots = item["Screenshots"]
                 for i in range(1, 9):
                     if i <= len(screenshots):
                         row[f"Скриншот {i}"] = f'=IMAGE("{screenshots[i-1]}")'
@@ -163,7 +182,7 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
             scr_cols = [f"Скриншот {i}" for i in range(1, 9)]
             df = df[base_cols + scr_cols]
             
-            st.success(f"Успешно собрано! Всего версий в таблице: {len(df)}")
+            st.success(f"Готово! Собрано официальных версий: {len(df)}")
             st.dataframe(df)
             
             import io
@@ -179,4 +198,4 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("Данные не найдены. Проверьте правильность ID приложения / Бандла.")
+            st.error("Данные не найдены. Проверьте правильность ID приложения.")
