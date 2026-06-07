@@ -4,11 +4,12 @@ import pycountry
 import requests
 import re
 import json
+from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="ASO Global Pro Clean", layout="wide")
+st.set_page_config(page_title="ASO Global Pro Max", layout="wide")
 
 st.title("📱 Официальный Глобальный ASO Парсер")
-st.caption("Прямые запросы к Google и Apple без сторонних API и воркеров")
+st.caption("Полный сбор метаданных: включая Short Description для Google Play и Subtitle для App Store")
 
 platform = st.selectbox("1. Выберите платформу", ["Google Play", "App Store"])
 app_id = st.text_input("2. Введите ID приложения (бандл)", placeholder="com.instagram.android / id389801252")
@@ -44,7 +45,6 @@ final_selected_countries = st.multiselect(
 
 st.markdown("---")
 
-# Карта мультиязычности
 MULTI_LANG_EXCEPTIONS = {
     "SA": ["ar", "en"], "QA": ["ar", "en"], "AE": ["ar", "en"], "KW": ["ar", "en"], 
     "BH": ["ar", "en"], "OM": ["ar", "en"], "EG": ["ar", "en"], "JO": ["ar", "en"], "LB": ["ar", "en"],
@@ -62,53 +62,112 @@ def get_official_languages(country_code):
         return MULTI_LANG_EXCEPTIONS[up_code]
     return [country_code.lower(), "en"]
 
-# --- ПРЯМОЙ ПАРСИНГ GOOGLE PLAY БЕЗ ПОСРЕДНИКОВ ---
+# --- ИСПРАВЛЕННЫЙ ПАРСИНГ GOOGLE PLAY С СБОРОМ SHORT DESCRIPTION ---
 def parse_google_play_direct(bundle, country, lang):
-    # Официальный URL Google Play с параметрами локали и региона
     url = f"https://play.google.com/store/apps/details?id={bundle}&hl={lang}&gl={country}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept-Language": f"{lang}-{country.upper()},{lang};q=0.9"
     }
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             html = res.text
+            soup = BeautifulSoup(html, "html.parser")
             
-            # Извлекаем Тайтл
-            title_match = re.search(r'<h1[^>]*itemprop="name"[^>]*><span[^>]*>([^<]+)</span>', html)
-            if not title_match:
-                title_match = re.search(r'<title[^>]*>([^<]+) - Apps on Google Play</title>', html)
-            title = title_match.group(1).strip() if title_match else "Unknown Title"
+            # Ищем скрипт с внутренним JSON стора
+            script_data = ""
+            for script in soup.find_all("script"):
+                if script.string and "AF_initDataCallback" in script.string and "ds:5" in script.string:
+                    script_data = script.string
+                    break
             
-            # Извлекаем Иконку
-            icon_match = re.search(r'<img[^>]*itemprop="image"[^>]*src="([^"]+)"', html)
-            if not icon_match:
-                icon_match = re.search(r'srcset="([^ ]+)[^"]*"[^>]*itemprop="image"', html)
-            icon = icon_match.group(1) if icon_match else ""
+            if not script_data:
+                for script in soup.find_all("script"):
+                    if script.string and "AF_initDataCallback" in script.string and "key: 'ds:" in script.string:
+                        script_data = script.string
+                        break
+            
+            title, short_description, description, icon, screenshots = "Unknown Title", "", "", "", []
+            
+            if script_data:
+                try:
+                    json_match = re.search(r'data:\s*(\[.+?\])\s*,\s*sideChannel:', script_data, re.DOTALL)
+                    if json_match:
+                        data_array = json.loads(json_match.group(1))
+                        
+                        try: app_info = data_array[0][1][2]
+                        except: app_info = data_array
+                        
+                        # 1. Точный Тайтл
+                        try: title = app_info[0][0]
+                        except: pass
+                        
+                        # 2. Настоящий Short Description (Короткое описание приложения)
+                        try: short_description = app_info[73][0][1]
+                        except:
+                            try: short_description = app_info[63][1][1]  # Альтернативная ветка структуры
+                            except: pass
+                        
+                        # 3. Полное Описание
+                        try: description = app_info[72][0][1]
+                        except:
+                            try: description = app_info[10][0][1]
+                            except: pass
+                            
+                        # 4. Иконка
+                        try: icon = app_info[95][0][3][2]
+                        except: pass
+                            
+                        # 5. Скриншоты
+                        try:
+                            scr_data = app_info[78][0]
+                            for img_wrapper in scr_data:
+                                url_img = img_wrapper[3][2]
+                                if url_img and url_img not in screenshots:
+                                    screenshots.append(url_img)
+                        except: pass
+                except:
+                    pass
+            
+            # --- Резервный сбор, если Google перетасовал JSON-массив ---
+            if title == "Unknown Title" or not title:
+                title_tag = soup.find("h1") or soup.find("title")
+                title = title_tag.get_text().replace(" - Apps on Google Play", "").strip() if title_tag else "Unknown Title"
+            
+            # Если короткое описание не вытянулось из JSON, ищем его в мета-тегах
+            if not short_description:
+                meta_og_desc = soup.find("meta", {"property": "og:description"})
+                if meta_og_desc and meta_og_desc.get("content"):
+                    short_description = meta_og_desc["content"].strip()
+            
+            if not description:
+                desc_meta = soup.find("meta", {"name": "description"})
+                description = desc_meta["content"].strip() if desc_meta else "Смотрите описание в сторе"
+                
+            if not icon:
+                try: icon = soup.find("meta", {"property": "og:image"})["content"]
+                except: pass
+                
             if icon and icon.startswith("//"): icon = "https:" + icon
 
-            # Извлекаем Скриншоты
-            screenshot_urls = re.findall(r'<img[^>]*srcset="([^ ]+)' , html)
-            # Фильтруем только уникальные ссылки на скриншоты (гугловские s3/ggpht)
-            screenshots = list(set([src for src in screenshot_urls if "ggpht.com" in src or "googleusercontent.com" in src]))[:8]
-            
-            # Короткое и полное описание (базовый сбор)
-            desc_match = re.search(r'<div[^>]*itemprop="description"[^>]*>.*?<div[^>]*>(.*?)</div>', html, re.DOTALL)
-            description = desc_match.group(1).replace("<br>", "\n").strip() if desc_match else "Открыть стор для просмотра описания"
+            if not screenshots:
+                for img in soup.find_all("img"):
+                    src = img.get("src") or img.get("srcset", "").split(" ")[0]
+                    if src and ("ggpht.com" in src or "googleusercontent.com" in src) and "rw" in src:
+                        if src.startswith("//"): src = "https:" + src
+                        if src not in screenshots: screenshots.append(src)
             
             return {
                 "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
-                "Title": title, "Subtitle / Short": "Прямой сбор текста", "Description": description[:500] + "...", 
-                "Icon": icon, "Screenshots": screenshots
+                "Title": title, "Subtitle / Short": short_description if short_description else "Не задан разработчиком", 
+                "Description": description[:1000] + "...", "Icon": icon, "Screenshots": screenshots[:8]
             }
-        else:
-            st.warning(f"Google Play вернул статус {res.status_code} для {country.upper()}-{lang.upper()}")
     except Exception as e:
-        st.error(f"Ошибка запроса к Google для {country.upper()}: {e}")
+        st.error(f"Ошибка запроса для {country.upper()}: {e}")
     return None
 
-# --- ПРЯМОЙ ПАРСИНГ APP STORE БЕЗ ПОСРЕДНИКОВ ---
+# --- ПРЯМОЙ ПАРСИНГ APP STORE ---
 def parse_app_store_direct(app_id, country):
     if "id" in app_id:
         match = re.search(r'id(\d+)', app_id)
@@ -123,11 +182,11 @@ def parse_app_store_direct(app_id, country):
                 item = json_data["results"][0]
                 return {
                     "Platform": "App Store", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": "DEFAULT",
-                    "Title": item.get("trackName"), "Subtitle / Short": item.get("subtitle", ""), "Description": item.get("description", "")[:500] + "...",
+                    "Title": item.get("trackName"), 
+                    "Subtitle / Short": item.get("subtitle", "Не задан разработчиком"), # Официальный Subtitle в iOS
+                    "Description": item.get("description", "")[:1000] + "...",
                     "Icon": item.get("artworkUrl100"), "Screenshots": item.get("screenshotUrls", [])[:8]
                 }
-        else:
-            st.warning(f"App Store вернул статус {res.status_code} для {country.upper()}")
     except Exception as e: 
         st.error(f"Ошибка запроса к Apple для {country.upper()}: {e}")
     return None
@@ -142,7 +201,7 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
         chosen_country_codes = [text.split(" - ")[0].strip().upper() for text in final_selected_countries]
         raw_results = []
         
-        with st.spinner("Связываемся напрямую со сторами..."):
+        with st.spinner("Вытаскиваем метаданные, тайтлы и короткие описания..."):
             for country in chosen_country_codes:
                 if platform == "Google Play":
                     langs = get_official_languages(country)
@@ -163,7 +222,7 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
                     "ГЕО (gl)": item["GL"],
                     "Язык (hl)": item["HL"],
                     "Тайтл": item["Title"],
-                    "Субтитл": item["Subtitle / Short"],
+                    "Субтитл / Шорт": item["Subtitle / Short"],
                     "Описание": item["Description"],
                     "Иконка": f'=IMAGE("{item["Icon"]}")' if item["Icon"] else ""
                 }
@@ -178,11 +237,11 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
                 processed_rows.append(row)
                 
             df = pd.DataFrame(processed_rows)
-            base_cols = ["Платформа", "Страна", "ГЕО (gl)", "Язык (hl)", "Иконка", "Тайтл", "Субтитл", "Описание"]
+            base_cols = ["Платформа", "Страна", "ГЕО (gl)", "Язык (hl)", "Иконка", "Тайтл", "Субтитл / Шорт", "Описание"]
             scr_cols = [f"Скриншот {i}" for i in range(1, 9)]
             df = df[base_cols + scr_cols]
             
-            st.success(f"Готово! Собрано официальных версий: {len(df)}")
+            st.success(f"Успешно собрано официальных версий: {len(df)}")
             st.dataframe(df)
             
             import io
@@ -192,10 +251,10 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
             buffer.seek(0)
             
             st.download_button(
-                label="📥 Скачать Excel (.xlsx) с иконками и скриншотами",
+                label="📥 Скачать чистый Excel (.xlsx)",
                 data=buffer,
-                file_name=f"aso_report_{app_id}.xlsx",
+                file_name=f"aso_final_report_{app_id}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("Данные не найдены. Проверьте правильность ID приложения.")
+            st.error("Данные не найдены.")
