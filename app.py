@@ -8,7 +8,7 @@ import json
 st.set_page_config(page_title="ASO Global Pro Max", layout="wide")
 
 st.title("📱 Официальный Глобальный ASO Парсер")
-st.caption("Стабильная версия: Прямые RPC-запросы к Google Play и iTunes Lookup")
+st.caption("Гибридный выбор ГЕО: автоматические группы + ручной выбор отдельных стран")
 
 platform = st.selectbox("1. Выберите платформу", ["Google Play", "App Store"])
 app_id = st.text_input("2. Введите ID приложения (бандл)", placeholder="com.instagram.android / id389801252")
@@ -29,17 +29,20 @@ GEO_GROUPS = {
     "СНГ и Смежные": ["RU", "KZ", "BY", "UZ", "AM", "GE", "UA", "KG", "MD", "AZ"]
 }
 
+# 1. Быстрый выбор группами (Пресет)
 selected_groups = st.multiselect("Быстрый выбор региона группами (опционально):", options=list(GEO_GROUPS.keys()))
 
+# Собираем коды из выбранных групп
 preselected_codes = set()
 for group in selected_groups:
     preselected_codes.update(GEO_GROUPS[group])
 
+# Формируем список строк для отображения в дефолтных значениях ручного выбора
 default_countries_options = [f"{code} - {ALL_COUNTRIES[code]}" for code in preselected_codes if code in ALL_COUNTRIES]
 
-# Итоговый выбор: здесь можно выбрать ЛЮБУЮ страну из списка всех стран мира вручную
+# 2. ГИБРИДНЫЙ ВЫБОР: Сюда падают страны из групп, НО можно руками удалять их или добавлять ЛЮБЫЕ другие страны мира
 final_selected_countries = st.multiselect(
-    "Итоговый список стран для выгрузки (можно искать и добавлять вручную любую страну мира):",
+    "Итоговый список стран для выгрузки (добавляй отдельные страны руками или удаляй крестиком):",
     options=all_countries_options,
     default=default_countries_options
 )
@@ -63,11 +66,9 @@ def get_official_languages(country_code):
         return MULTI_LANG_EXCEPTIONS[up_code]
     return [country_code.lower(), "en"]
 
-# --- СТАБИЛЬНЫЙ ПАРСИНГ GOOGLE PLAY ЧЕРЕЗ BATCHEXECUTE API ---
+# --- RPC-ПАРСИНГ GOOGLE PLAY ---
 def parse_google_play_rpc(bundle, country, lang):
     url = "https://play.google.com/_/PlayStoreUi/data/batchexecute"
-    
-    # Официальный внутренний RPC-запрос для получения деталей приложения (внутренний id: rpcId 'jQ136b')
     payload = f'f.req=[[["jQ136b","[[\\"{bundle}\\",1,null,1]]",null,"generic"]]]'
     
     headers = {
@@ -75,52 +76,41 @@ def parse_google_play_rpc(bundle, country, lang):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    params = {
-        "hl": lang.lower(),
-        "gl": country.lower()
-    }
+    params = {"hl": lang.lower(), "gl": country.lower()}
     
     try:
         res = requests.post(url, params=params, data=payload, headers=headers, timeout=15)
         if res.status_code == 200:
             text = res.text
             match = re.search(r'\[\["wrb.fr".*?\]\]', text, re.DOTALL)
-            if not match:
-                return None
+            if not match: return None
                 
             raw_json = json.loads(match.group(0))
-            inner_data_str = raw_json[0][2]
-            inner_data = json.loads(inner_data_str)
-            
-            # Внутри структуры batchexecute данные лежат по строгим индексам
+            inner_data = json.loads(raw_json[0][2])
             app_details = inner_data[1][2]
             
-            title = app_details[0][0]  # Название
-            short_desc = app_details[73][0][1]  # Короткое описание (Short Description)
-            long_desc = app_details[72][0][1]  # Длинное описание (Long Description)
-            icon = app_details[95][0][3][2]  # Иконка
+            title = app_details[0][0]
+            short_desc = app_details[73][0][1]
+            long_desc = app_details[72][0][1]
+            icon = app_details[95][0][3][2]
             
-            # Скриншоты достаются только из выделенного под них массива ассетов
             screenshots = []
             try:
                 scr_list = app_details[78][0]
                 for scr in scr_list:
                     img_url = scr[3][2]
-                    if img_url and img_url not in screenshots:
-                        screenshots.append(img_url)
-            except:
-                pass
+                    if img_url and img_url not in screenshots: screenshots.append(img_url)
+            except: pass
                 
             return {
                 "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
                 "Title": title, "Subtitle / Short": short_desc, "Description": long_desc, 
                 "Icon": icon, "Screenshots": screenshots[:8]
             }
-    except Exception as e:
-        pass
+    except: pass
     return None
 
-# --- ОФИЦИАЛЬНЫЙ ПАРСИНГ APP STORE ---
+# --- ПАРСИНГ APP STORE ---
 def parse_app_store_direct(app_id, country):
     if "id" in app_id:
         match = re.search(r'id(\d+)', app_id)
@@ -140,8 +130,7 @@ def parse_app_store_direct(app_id, country):
                     "Description": item.get("description", ""),
                     "Icon": item.get("artworkUrl100"), "Screenshots": item.get("screenshotUrls", [])[:8]
                 }
-    except Exception as e: 
-        st.error(f"Ошибка запроса к Apple для {country.upper()}: {e}")
+    except: pass
     return None
 
 # --- Сбор данных ---
@@ -149,13 +138,14 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
     if not app_id:
         st.error("Введите ID приложения!")
     elif not final_selected_countries:
-        st.error("Выберите страны!")
+        st.error("Выберите хотя бы одну страну для выгрузки!")
     else:
+        # Извлекаем двухзначные коды стран из итогового выбранного списка
         chosen_country_codes = [text.split(" - ")[0].strip().upper() for text in final_selected_countries]
         raw_results = []
         
-        with st.spinner("Загрузка официальных метаданных сторов..."):
-            for country in chosen_country_codes:
+        with st.spinner("Загрузка официальных метаданных..."):
+            for country in sorted(chosen_country_codes):
                 if platform == "Google Play":
                     langs = get_official_languages(country)
                     for lang in langs:
@@ -194,7 +184,7 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
             scr_cols = [f"Скриншот {i}" for i in range(1, 9)]
             df = df[base_cols + scr_cols]
             
-            st.success(f"Успешно собрано официальных версий: {len(df)}")
+            st.success(f"Успешно собрано локалей: {len(df)}")
             st.dataframe(df)
             
             import io
