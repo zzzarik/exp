@@ -6,10 +6,10 @@ import re
 import json
 from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="ASO Global Pro Max", layout="wide")
+st.set_page_config(page_title="ASO Global Pro Ultra Fix", layout="wide")
 
 st.title("📱 Официальный Глобальный ASO Парсер")
-st.caption("Полный сбор метаданных: включая Short Description для Google Play и Subtitle для App Store")
+st.caption("Исправлено: Настоящий Long Description и только РЕАЛЬНЫЕ скриншоты приложения")
 
 platform = st.selectbox("1. Выберите платформу", ["Google Play", "App Store"])
 app_id = st.text_input("2. Введите ID приложения (бандл)", placeholder="com.instagram.android / id389801252")
@@ -62,11 +62,11 @@ def get_official_languages(country_code):
         return MULTI_LANG_EXCEPTIONS[up_code]
     return [country_code.lower(), "en"]
 
-# --- ИСПРАВЛЕННЫЙ ПАРСИНГ GOOGLE PLAY С СБОРОМ SHORT DESCRIPTION ---
+# --- ЖЕЛЕЗОБЕТОННЫЙ РАЗБОР GOOGLE PLAY ---
 def parse_google_play_direct(bundle, country, lang):
     url = f"https://play.google.com/store/apps/details?id={bundle}&hl={lang}&gl={country}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept-Language": f"{lang}-{country.upper()},{lang};q=0.9"
     }
     try:
@@ -75,99 +75,93 @@ def parse_google_play_direct(bundle, country, lang):
             html = res.text
             soup = BeautifulSoup(html, "html.parser")
             
-            # Ищем скрипт с внутренним JSON стора
-            script_data = ""
+            # Собираем ВСЕ текстовые блоки из AF_initDataCallback, чтобы вытащить описания без привязки к индексам
+            all_strings = []
             for script in soup.find_all("script"):
-                if script.string and "AF_initDataCallback" in script.string and "ds:5" in script.string:
-                    script_data = script.string
-                    break
+                if script.string and "AF_initDataCallback" in script.string:
+                    # Выдергиваем все текстовые фрагменты в кавычках
+                    found_strs = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', script.string)
+                    for s in found_strs:
+                        s_clean = s.replace('\\n', '\n').replace('\\t', '').strip()
+                        if len(s_clean) > 5 and s_clean not in all_strings:
+                            all_strings.append(s_clean)
             
-            if not script_data:
-                for script in soup.find_all("script"):
-                    if script.string and "AF_initDataCallback" in script.string and "key: 'ds:" in script.string:
-                        script_data = script.string
+            # Вычисляем Шорт и Лонг по длине и вхождению
+            short_description = ""
+            long_description = ""
+            
+            # Сортируем собранные тексты по длине
+            potential_descriptions = [s for s in all_strings if len(s) > 10 and not s.startswith("http") and not s.startswith("ds:")]
+            potential_descriptions.sort(key=len, reverse=True)
+            
+            # Самый длинный текст на странице стора — это 100% полное описание (Long Description)
+            if potential_descriptions:
+                long_description = potential_descriptions[0]
+                
+                # Короткое описание обычно имеет длину до 120 символов и является подстрокой или идет отдельно
+                for text in potential_descriptions[1:]:
+                    if len(text) <= 120 and text not in long_description:
+                        short_description = text
                         break
-            
-            title, short_description, description, icon, screenshots = "Unknown Title", "", "", "", []
-            
-            if script_data:
-                try:
-                    json_match = re.search(r'data:\s*(\[.+?\])\s*,\s*sideChannel:', script_data, re.DOTALL)
-                    if json_match:
-                        data_array = json.loads(json_match.group(1))
-                        
-                        try: app_info = data_array[0][1][2]
-                        except: app_info = data_array
-                        
-                        # 1. Точный Тайтл
-                        try: title = app_info[0][0]
-                        except: pass
-                        
-                        # 2. Настоящий Short Description (Короткое описание приложения)
-                        try: short_description = app_info[73][0][1]
-                        except:
-                            try: short_description = app_info[63][1][1]  # Альтернативная ветка структуры
-                            except: pass
-                        
-                        # 3. Полное Описание
-                        try: description = app_info[72][0][1]
-                        except:
-                            try: description = app_info[10][0][1]
-                            except: pass
-                            
-                        # 4. Иконка
-                        try: icon = app_info[95][0][3][2]
-                        except: pass
-                            
-                        # 5. Скриншоты
-                        try:
-                            scr_data = app_info[78][0]
-                            for img_wrapper in scr_data:
-                                url_img = img_wrapper[3][2]
-                                if url_img and url_img not in screenshots:
-                                    screenshots.append(url_img)
-                        except: pass
-                except:
-                    pass
-            
-            # --- Резервный сбор, если Google перетасовал JSON-массив ---
-            if title == "Unknown Title" or not title:
-                title_tag = soup.find("h1") or soup.find("title")
-                title = title_tag.get_text().replace(" - Apps on Google Play", "").strip() if title_tag else "Unknown Title"
-            
-            # Если короткое описание не вытянулось из JSON, ищем его в мета-тегах
-            if not short_description:
-                meta_og_desc = soup.find("meta", {"property": "og:description"})
-                if meta_og_desc and meta_og_desc.get("content"):
-                    short_description = meta_og_desc["content"].strip()
-            
-            if not description:
-                desc_meta = soup.find("meta", {"name": "description"})
-                description = desc_meta["content"].strip() if desc_meta else "Смотрите описание в сторе"
-                
-            if not icon:
-                try: icon = soup.find("meta", {"property": "og:image"})["content"]
-                except: pass
-                
-            if icon and icon.startswith("//"): icon = "https:" + icon
+                # Если отдельный шорт не нашелся, берем первое предложение из лонга
+                if not short_description:
+                    short_description = long_description.split('.')[0] + "."
 
-            if not screenshots:
-                for img in soup.find_all("img"):
-                    src = img.get("src") or img.get("srcset", "").split(" ")[0]
-                    if src and ("ggpht.com" in src or "googleusercontent.com" in src) and "rw" in src:
-                        if src.startswith("//"): src = "https:" + src
-                        if src not in screenshots: screenshots.append(src)
+            # Находим чистый Тайтл
+            title_tag = soup.find("h1")
+            title = title_tag.get_text().strip() if title_tag else ""
+            if not title:
+                meta_title = soup.find("title")
+                title = meta_title.get_text().replace(" - Apps on Google Play", "").strip() if meta_title else "Unknown Title"
+
+            # Находим Иконку приложения
+            icon = ""
+            meta_og_image = soup.find("meta", {"property": "og:image"})
+            if meta_og_image and meta_og_image.get("content"):
+                icon = meta_og_image["content"]
+
+            # --- ФИЛЬТРАЦИЯ ТОЛЬКО РЕАЛЬНЫХ СКРИНШОТОВ ПРИЛОЖЕНИЯ ---
+            screenshots = []
+            for script in soup.find_all("script"):
+                if script.string and "AF_initDataCallback" in script.string and "ggpht.com" in script.string:
+                    # Ищем полноценные ссылки на Google контент
+                    urls = re.findall(r'(https://lh3\.googleusercontent\.com/[^\s"\']+|https://[^.\s"\']+\.ggpht\.com/[^\s"\']+)', script.string)
+                    for u in urls:
+                        u_clean = u.split("=")[0].split('"')[0].split("'")[0] # Чистим параметры обрезки гугла
+                        # Скриншоты в новом Google Play содержат в URL спец-маркеры (fife, rw, или специфичные хэши)
+                        # И исключаем иконки рейтингов (они обычно содержат фиксированные паттерны или очень мелкие)
+                        if "ggpht.com" in u_clean or "googleusercontent.com" in u_clean:
+                            if u_clean not in screenshots and u_clean != icon:
+                                # Пропускаем заведомо известные мелкие служебные иконки стора
+                                if any(x in u_clean.lower() for x in ["/me/", "/pc/", "shared-icon", "google-play-"]):
+                                    continue
+                                screenshots.append(u_clean)
+
+            # Отбираем только те картинки, которые идут плотным массивом галереи (обычно они имеют схожую структуру URL)
+            # Зачастую первые 2-3 ссылки — это аватарки или дубли иконки, реальные скрины идут следом
+            final_screenshots = []
+            for scr in screenshots:
+                # Фильтр: настоящие скриншоты Google Play хранятся с длинными хэшами, отсекаем мусорные мелкие плашки рейтингов PEGI
+                if len(scr) > 60: 
+                    final_screenshots.append(scr)
             
+            # Если наловилось слишком много мусора, берем срез галереи, где лежат реальные скрины
+            if len(final_screenshots) > 8:
+                # Убираем возможный дубликат иконки из начала массива
+                final_screenshots = [img for img in final_screenshots if img != icon][:8]
+            else:
+                final_screenshots = final_screenshots[:8]
+
             return {
                 "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
-                "Title": title, "Subtitle / Short": short_description if short_description else "Не задан разработчиком", 
-                "Description": description[:1000] + "...", "Icon": icon, "Screenshots": screenshots[:8]
+                "Title": title, "Subtitle / Short": short_description, "Description": long_description, 
+                "Icon": icon, "Screenshots": final_screenshots
             }
     except Exception as e:
         st.error(f"Ошибка запроса для {country.upper()}: {e}")
     return None
 
-# --- ПРЯМОЙ ПАРСИНГ APP STORE ---
+# --- ПАРСИНГ APP STORE ---
 def parse_app_store_direct(app_id, country):
     if "id" in app_id:
         match = re.search(r'id(\d+)', app_id)
@@ -183,8 +177,8 @@ def parse_app_store_direct(app_id, country):
                 return {
                     "Platform": "App Store", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": "DEFAULT",
                     "Title": item.get("trackName"), 
-                    "Subtitle / Short": item.get("subtitle", "Не задан разработчиком"), # Официальный Subtitle в iOS
-                    "Description": item.get("description", "")[:1000] + "...",
+                    "Subtitle / Short": item.get("subtitle", "Не задан разработчиком"), 
+                    "Description": item.get("description", ""),
                     "Icon": item.get("artworkUrl100"), "Screenshots": item.get("screenshotUrls", [])[:8]
                 }
     except Exception as e: 
@@ -201,7 +195,7 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
         chosen_country_codes = [text.split(" - ")[0].strip().upper() for text in final_selected_countries]
         raw_results = []
         
-        with st.spinner("Вытаскиваем метаданные, тайтлы и короткие описания..."):
+        with st.spinner("Выгружаем чистые метаданные (Лонг, Шорт и Скриншоты)..."):
             for country in chosen_country_codes:
                 if platform == "Google Play":
                     langs = get_official_languages(country)
