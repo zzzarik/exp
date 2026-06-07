@@ -4,16 +4,52 @@ import pycountry
 import requests
 import re
 
-st.set_page_config(page_title="ASO IMAGE Formula Parser", layout="wide")
+st.set_page_config(page_title="ASO Global Pro", layout="wide")
 
-st.title("📱 Глобальный ASO Парсер с формулой =IMAGE()")
-st.caption("Автоматически генерирует формулы для иконок и до 8 скриншотов в отдельных ячейках")
+st.title("📱 Глобальный ASO Парсер метаданных")
+st.caption("Удобный выбор ГЕО по группам, поиск по всему миру и автозагрузка картинок через =IMAGE()")
 
 platform = st.selectbox("1. Выберите платформу", ["Google Play", "App Store"])
 app_id = st.text_input("2. Введите ID приложения (бандл)", placeholder="com.instagram.android / id389801252")
 
+st.markdown("---")
+st.subheader("🌍 3. Выбор стран и регионов")
+
+# Полная база всех стран мира из ISO
 ALL_COUNTRIES = {c.alpha_2.lower(): c.name for c in pycountry.countries}
 
+# Твои удобные ГЕО-группы для быстрого клика
+GEO_GROUPS = {
+    "Tier-1 (Запад)": ["us", "ca", "gb", "de", "fr", "it", "es", "au"],
+    "Tier-1 (Азия)": ["jp", "kr", "cn", "tw", "sg"],
+    "Евросоюз (EU)": ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"],
+    "ЛАТАМ (LATAM)": ["br", "mx", "ar", "co", "cl", "pe"],
+    "Ближний Восток / MENA": ["sa", "ae", "eg", "tr", "il", "qa", "kw", "bh", "om", "jo", "lb"],
+    "СНГ и Смежные": ["ru", "kz", "by", "uz", "am", "ge", "ua", "kg", "md", "az"]
+}
+
+# 1. Сначала выбираем группы
+selected_groups = st.multiselect("Быстрый выбор регионов группами:", options=list(GEO_GROUPS.keys()))
+
+# Собираем коды стран из выбранных групп
+preselected_codes = set()
+for group in selected_groups:
+    preselected_codes.update(GEO_GROUPS[group])
+
+# Формируем списки для красивого отображения в поиске
+all_countries_options = [f"{name} ({code.upper()})" for code, name in ALL_COUNTRIES.items()]
+default_countries_options = [f"{ALL_COUNTRIES[code]} ({code.upper()})" for code in preselected_codes if code in ALL_COUNTRIES]
+
+# 2. Финальный поиск-мультиселект (сюда автоматически залетают страны из групп, и можно дописать любые руками)
+final_selected_countries = st.multiselect(
+    "Итоговый список стран для выгрузки (можно искать и добавлять штучно):",
+    options=all_countries_options,
+    default=default_countries_options
+)
+
+st.markdown("---")
+
+# Официальная карта мультиязычности для Google Play
 MULTI_LANG_EXCEPTIONS = {
     "sa": ["ar", "en"], "qa": ["ar", "en"], "ae": ["ar", "en"], "kw": ["ar", "en"], 
     "bh": ["ar", "en"], "om": ["ar", "en"], "eg": ["ar", "en"], "jo": ["ar", "en"], "lb": ["ar", "en"],
@@ -25,18 +61,12 @@ MULTI_LANG_EXCEPTIONS = {
     "kg": ["ky", "ru"], "md": ["ro", "ru"], "am": ["hy", "ru"], "ge": ["ka", "ru"], "az": ["az", "ru"],
 }
 
-selected_countries = st.multiselect(
-    "3. Выберите любые страны мира:",
-    options=list(ALL_COUNTRIES.keys()),
-    format_func=lambda x: f"{ALL_COUNTRIES[x]} ({x.upper()})"
-)
-
 def get_official_languages(country_code):
     if country_code in MULTI_LANG_EXCEPTIONS:
         return MULTI_LANG_EXCEPTIONS[country_code]
     return [country_code, "en"]
 
-# --- Основные функции парсинга ---
+# --- Функции парсинга ---
 def parse_google_play(bundle, country, lang):
     url = f"https://play-store-api.asotools.workers.dev/api/apps/{bundle}?lang={lang}&country={country}"
     try:
@@ -44,12 +74,10 @@ def parse_google_play(bundle, country, lang):
         if res.status_code == 200:
             item = res.json()
             if "title" in item:
-                # Получаем список скриншотов (если они есть)
-                scr_list = item.get("screenshots", [])
                 return {
                     "Platform": "Google Play", "Country": ALL_COUNTRIES[country], "GL": country.upper(), "HL": lang.upper(),
                     "Title": item.get("title"), "Subtitle / Short": item.get("summary"), "Description": item.get("description"),
-                    "Icon": item.get("icon"), "Screenshots": scr_list
+                    "Icon": item.get("icon"), "Screenshots": item.get("screenshots", [])
                 }
     except Exception: pass
     return None
@@ -74,17 +102,19 @@ def parse_app_store(app_id, country):
     except Exception: pass
     return None
 
-# --- Обработка и генерация таблицы ---
-if st.button("🚀 Сгенерировать ASO таблицу", type="primary"):
+# --- Сбор ---
+if st.button("🚀 Начать сбор метаданных", type="primary"):
     if not app_id:
         st.error("Введите ID приложения!")
-    elif not selected_countries:
+    elif not final_selected_countries:
         st.error("Выберите страны!")
     else:
+        # Извлекаем чистые двухбуквенные коды стран из выбранных строк (например, "Qatar (QA)" -> "qa")
+        chosen_country_codes = [text.split("(")[1].replace(")", "").lower() for text in final_selected_countries]
         raw_results = []
         
-        with st.spinner("Парсим метаданные..."):
-            for country in selected_countries:
+        with st.spinner("Выгружаем данные..."):
+            for country in chosen_country_codes:
                 if platform == "Google Play":
                     langs = get_official_languages(country)
                     for lang in langs:
@@ -98,7 +128,6 @@ if st.button("🚀 Сгенерировать ASO таблицу", type="primary
             processed_rows = []
             
             for item in raw_results:
-                # Базовые текстовые данные
                 row = {
                     "Платформа": item["Platform"],
                     "Страна": item["Country"],
@@ -107,30 +136,27 @@ if st.button("🚀 Сгенерировать ASO таблицу", type="primary
                     "Тайтл": item["Title"],
                     "Субтитл": item["Subtitle / Short"],
                     "Описание": item["Description"],
-                    # Оборачиваем иконку в формулу
                     "Иконка": f'=IMAGE("{item["Icon"]}")' if item["Icon"] else ""
                 }
                 
-                # Добавляем до 8 скриншотов в отдельные колонки, оборачивая каждый в =IMAGE()
-                screenshots = item["Screenshots"][:8] # берем максимум 8 штук
+                # Раскладываем до 8 скриншотов по отдельным колонкам через формулу
+                screenshots = item["Screenshots"][:8]
                 for i in range(1, 9):
                     if i <= len(screenshots):
                         row[f"Скриншот {i}"] = f'=IMAGE("{screenshots[i-1]}")'
                     else:
-                        row[f"Скриншот {i}"] = "" # пустая ячейка, если скриншотов меньше 8
+                        row[f"Скриншот {i}"] = ""
                         
                 processed_rows.append(row)
                 
             df = pd.DataFrame(processed_rows)
-            # Пересобираем порядок колонок, чтобы картинки шли первыми или логично структурировались
             base_cols = ["Платформа", "Страна", "ГЕО (gl)", "Язык (hl)", "Иконка", "Тайтл", "Субтитл", "Описание"]
             scr_cols = [f"Скриншот {i}" for i in range(1, 9)]
             df = df[base_cols + scr_cols]
             
-            st.success("Таблица с формулами готова!")
-            st.dataframe(df) # Внутри Streamlit будут видны сами формулы, это нормально
+            st.success(f"Успешно собрано! Всего версий в таблице: {len(df)}")
+            st.dataframe(df)
             
-            # Сохраняем в полноценный XLSX, чтобы формулы работали
             import io
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -138,10 +164,10 @@ if st.button("🚀 Сгенерировать ASO таблицу", type="primary
             buffer.seek(0)
             
             st.download_button(
-                label="📥 Скачать Excel (.xlsx) с автозагрузкой картинок",
+                label="📥 Скачать Excel (.xlsx) с иконками и скриншотами",
                 data=buffer,
-                file_name=f"aso_formulas_export_{app_id}.xlsx",
+                file_name=f"aso_report_{app_id}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("Ничего не найдено.")
+            st.error("Данные не найдены.")
