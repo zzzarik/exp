@@ -40,7 +40,7 @@ for group in selected_groups:
 # Формируем список строк для отображения в дефолтных значениях ручного выбора
 default_countries_options = [f"{code} - {ALL_COUNTRIES[code]}" for code in preselected_codes if code in ALL_COUNTRIES]
 
-# 2. ГИБРИДНЫЙ ВЫБОР: Сюда падают страны из групп, НО можно руками удалять их или добавлять ЛЮБЫЕ другие страны мира
+# 2. ГИБРИДНЫЙ ВЫБОР
 final_selected_countries = st.multiselect(
     "Итоговый список стран для выгрузки (добавляй отдельные страны руками или удаляй крестиком):",
     options=all_countries_options,
@@ -66,16 +66,15 @@ def get_official_languages(country_code):
         return MULTI_LANG_EXCEPTIONS[up_code]
     return [country_code.lower(), "en"]
 
-# --- RPC-ПАРСИНГ GOOGLE PLAY ---
+# --- УМНЫЙ ГИБКИЙ ПАРСИНГ GOOGLE PLAY ---
 def parse_google_play_rpc(bundle, country, lang):
     url = "https://play.google.com/_/PlayStoreUi/data/batchexecute"
     payload = f'f.req=[[["jQ136b","[[\\"{bundle}\\",1,null,1]]",null,"generic"]]]'
     
     headers = {
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
-    
     params = {"hl": lang.lower(), "gl": country.lower()}
     
     try:
@@ -86,22 +85,66 @@ def parse_google_play_rpc(bundle, country, lang):
             if not match: return None
                 
             raw_json = json.loads(match.group(0))
-            inner_data = json.loads(raw_json[0][2])
-            app_details = inner_data[1][2]
+            inner_data_str = raw_json[0][2]
+            if not inner_data_str: return None
             
-            title = app_details[0][0]
-            short_desc = app_details[73][0][1]
-            long_desc = app_details[72][0][1]
-            icon = app_details[95][0][3][2]
+            # Извлекаем вообще все текстовые строки из JSON, чтобы найти описания без привязки к индексам массива
+            all_strings = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', inner_data_str)
+            cleaned_strings = []
+            for s in all_strings:
+                s_clean = s.replace('\\n', '\n').replace('\\t', '').strip()
+                if len(s_clean) > 2 and not s_clean.startswith('http') and s_clean not in cleaned_strings:
+                    cleaned_strings.append(s_clean)
             
+            # Фильтруем потенциальные тексты описания
+            desc_candidates = [s for s in cleaned_strings if len(s) > 15 and not s.isnumeric()]
+            desc_candidates.sort(key=len, reverse=True)
+            
+            if not desc_candidates: return None
+            
+            # Самая длинная строка — это 100% Long Description
+            long_desc = desc_candidates[0]
+            title = "Unknown Title"
+            short_desc = ""
+            
+            # Тайтл обычно идет одной из первых строк и имеет длину до 50 символов
+            for s in cleaned_strings[:15]:
+                if 2 <= len(s) <= 50 and s != bundle:
+                    title = s
+                    break
+                    
+            # Ищем Short Description: строка короче 121 символа, не равная тайтлу
+            for s in desc_candidates[1:]:
+                if len(s) <= 120 and s != title:
+                    short_desc = s
+                    break
+            
+            if not short_desc:
+                short_desc = long_desc.split('\n')[0][:120]
+
+            # Собираем только реальные изображения
+            img_urls = re.findall(r'(https://lh3\.googleusercontent\.com/[^\s"\'\\\]]+|https://[^.\s"\'\\\]]+\.ggpht\.com/[^\s"\'\\\]]+)', inner_data_str)
+            
+            icon = ""
             screenshots = []
-            try:
-                scr_list = app_details[78][0]
-                for scr in scr_list:
-                    img_url = scr[3][2]
-                    if img_url and img_url not in screenshots: screenshots.append(img_url)
-            except: pass
+            
+            for url in img_urls:
+                url_clean = url.split("=")[0].split('"')[0].split("'")[0]
+                if url_clean.endswith('\\'): url_clean = url_clean[:-1]
                 
+                # Исключаем служебный мусор Google (кнопки, аватарки отзывов, иконки категорий и плашки рейтингов вроде PEGI)
+                if any(x in url_clean.lower() for x in ["/me/", "/pc/", "shared-icon", "google-play", "menu-icon", "infopage"]):
+                    continue
+                    
+                if not icon:
+                    icon = url_clean
+                    continue
+                    
+                if url_clean not in screenshots and url_clean != icon:
+                    # Чистые скриншоты имеют длинные уникальные хэши в URL (обычно > 70 символов)
+                    if len(url_clean) > 70:
+                        screenshots.append(url_clean)
+                        
             return {
                 "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
                 "Title": title, "Subtitle / Short": short_desc, "Description": long_desc, 
@@ -110,7 +153,7 @@ def parse_google_play_rpc(bundle, country, lang):
     except: pass
     return None
 
-# --- ПАРСИНГ APP STORE ---
+# --- ОФИЦИАЛЬНЫЙ ПАРСИНГ APP STORE ---
 def parse_app_store_direct(app_id, country):
     if "id" in app_id:
         match = re.search(r'id(\d+)', app_id)
@@ -140,7 +183,6 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
     elif not final_selected_countries:
         st.error("Выберите хотя бы одну страну для выгрузки!")
     else:
-        # Извлекаем двухзначные коды стран из итогового выбранного списка
         chosen_country_codes = [text.split(" - ")[0].strip().upper() for text in final_selected_countries]
         raw_results = []
         
