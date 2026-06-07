@@ -1,0 +1,4 @@
+google-play-scraper
+pycountry
+fake-useragent
+pandas
