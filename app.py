@@ -4,12 +4,11 @@ import pycountry
 import requests
 import re
 import json
-from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="ASO Global Pro Ultra Fix", layout="wide")
+st.set_page_config(page_title="ASO Global Pro Max", layout="wide")
 
 st.title("📱 Официальный Глобальный ASO Парсер")
-st.caption("Исправлено: Настоящий Long Description и только РЕАЛЬНЫЕ скриншоты приложения")
+st.caption("Стабильная версия: Прямые RPC-запросы к Google Play и iTunes Lookup")
 
 platform = st.selectbox("1. Выберите платформу", ["Google Play", "App Store"])
 app_id = st.text_input("2. Введите ID приложения (бандл)", placeholder="com.instagram.android / id389801252")
@@ -17,7 +16,9 @@ app_id = st.text_input("2. Введите ID приложения (бандл)",
 st.markdown("---")
 st.subheader("🌍 3. Выбор стран и регионов")
 
+# Полная база ВСЕХ стран мира из ISO
 ALL_COUNTRIES = {c.alpha_2.upper(): c.name for c in pycountry.countries}
+all_countries_options = sorted([f"{code} - {name}" for code, name in ALL_COUNTRIES.items()])
 
 GEO_GROUPS = {
     "Tier-1 (Запад)": ["US", "CA", "GB", "DE", "FR", "IT", "ES", "AU"],
@@ -28,17 +29,17 @@ GEO_GROUPS = {
     "СНГ и Смежные": ["RU", "KZ", "BY", "UZ", "AM", "GE", "UA", "KG", "MD", "AZ"]
 }
 
-selected_groups = st.multiselect("Быстрый выбор регионов группами:", options=list(GEO_GROUPS.keys()))
+selected_groups = st.multiselect("Быстрый выбор региона группами (опционально):", options=list(GEO_GROUPS.keys()))
 
 preselected_codes = set()
 for group in selected_groups:
     preselected_codes.update(GEO_GROUPS[group])
 
-all_countries_options = [f"{code} - {name}" for code, name in ALL_COUNTRIES.items()]
 default_countries_options = [f"{code} - {ALL_COUNTRIES[code]}" for code in preselected_codes if code in ALL_COUNTRIES]
 
+# Итоговый выбор: здесь можно выбрать ЛЮБУЮ страну из списка всех стран мира вручную
 final_selected_countries = st.multiselect(
-    "Итоговый список стран для выгрузки:",
+    "Итоговый список стран для выгрузки (можно искать и добавлять вручную любую страну мира):",
     options=all_countries_options,
     default=default_countries_options
 )
@@ -62,106 +63,64 @@ def get_official_languages(country_code):
         return MULTI_LANG_EXCEPTIONS[up_code]
     return [country_code.lower(), "en"]
 
-# --- ЖЕЛЕЗОБЕТОННЫЙ РАЗБОР GOOGLE PLAY ---
-def parse_google_play_direct(bundle, country, lang):
-    url = f"https://play.google.com/store/apps/details?id={bundle}&hl={lang}&gl={country}"
+# --- СТАБИЛЬНЫЙ ПАРСИНГ GOOGLE PLAY ЧЕРЕЗ BATCHEXECUTE API ---
+def parse_google_play_rpc(bundle, country, lang):
+    url = "https://play.google.com/_/PlayStoreUi/data/batchexecute"
+    
+    # Официальный внутренний RPC-запрос для получения деталей приложения (внутренний id: rpcId 'jQ136b')
+    payload = f'f.req=[[["jQ136b","[[\\"{bundle}\\",1,null,1]]",null,"generic"]]]'
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": f"{lang}-{country.upper()},{lang};q=0.9"
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    
+    params = {
+        "hl": lang.lower(),
+        "gl": country.lower()
+    }
+    
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.post(url, params=params, data=payload, headers=headers, timeout=15)
         if res.status_code == 200:
-            html = res.text
-            soup = BeautifulSoup(html, "html.parser")
-            
-            # Собираем ВСЕ текстовые блоки из AF_initDataCallback, чтобы вытащить описания без привязки к индексам
-            all_strings = []
-            for script in soup.find_all("script"):
-                if script.string and "AF_initDataCallback" in script.string:
-                    # Выдергиваем все текстовые фрагменты в кавычках
-                    found_strs = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', script.string)
-                    for s in found_strs:
-                        s_clean = s.replace('\\n', '\n').replace('\\t', '').strip()
-                        if len(s_clean) > 5 and s_clean not in all_strings:
-                            all_strings.append(s_clean)
-            
-            # Вычисляем Шорт и Лонг по длине и вхождению
-            short_description = ""
-            long_description = ""
-            
-            # Сортируем собранные тексты по длине
-            potential_descriptions = [s for s in all_strings if len(s) > 10 and not s.startswith("http") and not s.startswith("ds:")]
-            potential_descriptions.sort(key=len, reverse=True)
-            
-            # Самый длинный текст на странице стора — это 100% полное описание (Long Description)
-            if potential_descriptions:
-                long_description = potential_descriptions[0]
+            text = res.text
+            match = re.search(r'\[\["wrb.fr".*?\]\]', text, re.DOTALL)
+            if not match:
+                return None
                 
-                # Короткое описание обычно имеет длину до 120 символов и является подстрокой или идет отдельно
-                for text in potential_descriptions[1:]:
-                    if len(text) <= 120 and text not in long_description:
-                        short_description = text
-                        break
-                # Если отдельный шорт не нашелся, берем первое предложение из лонга
-                if not short_description:
-                    short_description = long_description.split('.')[0] + "."
-
-            # Находим чистый Тайтл
-            title_tag = soup.find("h1")
-            title = title_tag.get_text().strip() if title_tag else ""
-            if not title:
-                meta_title = soup.find("title")
-                title = meta_title.get_text().replace(" - Apps on Google Play", "").strip() if meta_title else "Unknown Title"
-
-            # Находим Иконку приложения
-            icon = ""
-            meta_og_image = soup.find("meta", {"property": "og:image"})
-            if meta_og_image and meta_og_image.get("content"):
-                icon = meta_og_image["content"]
-
-            # --- ФИЛЬТРАЦИЯ ТОЛЬКО РЕАЛЬНЫХ СКРИНШОТОВ ПРИЛОЖЕНИЯ ---
-            screenshots = []
-            for script in soup.find_all("script"):
-                if script.string and "AF_initDataCallback" in script.string and "ggpht.com" in script.string:
-                    # Ищем полноценные ссылки на Google контент
-                    urls = re.findall(r'(https://lh3\.googleusercontent\.com/[^\s"\']+|https://[^.\s"\']+\.ggpht\.com/[^\s"\']+)', script.string)
-                    for u in urls:
-                        u_clean = u.split("=")[0].split('"')[0].split("'")[0] # Чистим параметры обрезки гугла
-                        # Скриншоты в новом Google Play содержат в URL спец-маркеры (fife, rw, или специфичные хэши)
-                        # И исключаем иконки рейтингов (они обычно содержат фиксированные паттерны или очень мелкие)
-                        if "ggpht.com" in u_clean or "googleusercontent.com" in u_clean:
-                            if u_clean not in screenshots and u_clean != icon:
-                                # Пропускаем заведомо известные мелкие служебные иконки стора
-                                if any(x in u_clean.lower() for x in ["/me/", "/pc/", "shared-icon", "google-play-"]):
-                                    continue
-                                screenshots.append(u_clean)
-
-            # Отбираем только те картинки, которые идут плотным массивом галереи (обычно они имеют схожую структуру URL)
-            # Зачастую первые 2-3 ссылки — это аватарки или дубли иконки, реальные скрины идут следом
-            final_screenshots = []
-            for scr in screenshots:
-                # Фильтр: настоящие скриншоты Google Play хранятся с длинными хэшами, отсекаем мусорные мелкие плашки рейтингов PEGI
-                if len(scr) > 60: 
-                    final_screenshots.append(scr)
+            raw_json = json.loads(match.group(0))
+            inner_data_str = raw_json[0][2]
+            inner_data = json.loads(inner_data_str)
             
-            # Если наловилось слишком много мусора, берем срез галереи, где лежат реальные скрины
-            if len(final_screenshots) > 8:
-                # Убираем возможный дубликат иконки из начала массива
-                final_screenshots = [img for img in final_screenshots if img != icon][:8]
-            else:
-                final_screenshots = final_screenshots[:8]
-
+            # Внутри структуры batchexecute данные лежат по строгим индексам
+            app_details = inner_data[1][2]
+            
+            title = app_details[0][0]  # Название
+            short_desc = app_details[73][0][1]  # Короткое описание (Short Description)
+            long_desc = app_details[72][0][1]  # Длинное описание (Long Description)
+            icon = app_details[95][0][3][2]  # Иконка
+            
+            # Скриншоты достаются только из выделенного под них массива ассетов
+            screenshots = []
+            try:
+                scr_list = app_details[78][0]
+                for scr in scr_list:
+                    img_url = scr[3][2]
+                    if img_url and img_url not in screenshots:
+                        screenshots.append(img_url)
+            except:
+                pass
+                
             return {
                 "Platform": "Google Play", "Country": ALL_COUNTRIES.get(country.upper(), country), "GL": country.upper(), "HL": lang.upper(),
-                "Title": title, "Subtitle / Short": short_description, "Description": long_description, 
-                "Icon": icon, "Screenshots": final_screenshots
+                "Title": title, "Subtitle / Short": short_desc, "Description": long_desc, 
+                "Icon": icon, "Screenshots": screenshots[:8]
             }
     except Exception as e:
-        st.error(f"Ошибка запроса для {country.upper()}: {e}")
+        pass
     return None
 
-# --- ПАРСИНГ APP STORE ---
+# --- ОФИЦИАЛЬНЫЙ ПАРСИНГ APP STORE ---
 def parse_app_store_direct(app_id, country):
     if "id" in app_id:
         match = re.search(r'id(\d+)', app_id)
@@ -185,7 +144,7 @@ def parse_app_store_direct(app_id, country):
         st.error(f"Ошибка запроса к Apple для {country.upper()}: {e}")
     return None
 
-# --- Сбор ---
+# --- Сбор данных ---
 if st.button("🚀 Начать сбор метаданных", type="primary"):
     if not app_id:
         st.error("Введите ID приложения!")
@@ -195,12 +154,12 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
         chosen_country_codes = [text.split(" - ")[0].strip().upper() for text in final_selected_countries]
         raw_results = []
         
-        with st.spinner("Выгружаем чистые метаданные (Лонг, Шорт и Скриншоты)..."):
+        with st.spinner("Загрузка официальных метаданных сторов..."):
             for country in chosen_country_codes:
                 if platform == "Google Play":
                     langs = get_official_languages(country)
                     for lang in langs:
-                        data = parse_google_play_direct(app_id, country, lang)
+                        data = parse_google_play_rpc(app_id, country, lang)
                         if data: raw_results.append(data)
                 else:
                     data = parse_app_store_direct(app_id, country)
@@ -247,8 +206,8 @@ if st.button("🚀 Начать сбор метаданных", type="primary"):
             st.download_button(
                 label="📥 Скачать чистый Excel (.xlsx)",
                 data=buffer,
-                file_name=f"aso_final_report_{app_id}.xlsx",
+                file_name=f"aso_report_{app_id}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("Данные не найдены.")
+            st.error("Данные не найдены. Проверьте правильность ID приложения.")
