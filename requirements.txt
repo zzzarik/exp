@@ -1,4 +1,4 @@
-google-play-scraper
+requests
 pycountry
-fake-useragent
 pandas
+openpyxl
