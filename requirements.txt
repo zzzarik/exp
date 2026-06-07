@@ -3,3 +3,4 @@ pycountry
 pandas
 openpyxl
 beautifulsoup4
+google-play-scraper
