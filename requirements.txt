@@ -2,3 +2,4 @@ requests
 pycountry
 pandas
 openpyxl
+beautifulsoup4
